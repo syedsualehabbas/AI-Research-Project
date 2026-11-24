@@ -18,6 +18,11 @@ folder = output_folder("step4_training")
 
 def train_mixed(cheetah, policy, iterations):
     # normal learning: every iteration uses runs from several different masses mixed together
+# Pick 5 random masses.
+# For each, run the robot 10 times with the current policy, giving 50 runs.
+# Combine them into one big batch (combine).
+# Compute the policy gradient loss and take one Adam learning step.
+
     optimizer = torch.optim.Adam(policy.parameters(), lr=outer_lr)
     log = []
     for it in range(1, iterations + 1):
@@ -33,26 +38,65 @@ def train_mixed(cheetah, policy, iterations):
 
 
 def train_fomaml(cheetah, policy, iterations):
+    # The optimizer adam is the tool that updates the policy's weights.
     optimizer = torch.optim.Adam(policy.parameters(), lr=outer_lr)
+
+    # one pass = one training iteration. We repeat this "iterations" times.
     for it in range(1, iterations + 1):
+
+        # A box of zeros to collect the learning signal (gradient) from every task.
+        # It has one zero-filled slot for each weight in the policy.
         total_grads = [torch.zeros_like(p) for p in policy.parameters()]
+
+        # A list to remember how well the robot did on each task.
         scores = []
+
+        # repeat for 5 different masses (tasks_per_iteration = 5).
         for _ in range(tasks_per_iteration):
+
+            # Pick a random mass for this task.
             mass = sample_mass()
+
+            # Make a copy of the brain. We will let the COPY learn,
+            # so the original brain stays untouched for now.
             fast = copy.deepcopy(policy)
-            # inner step: practice with the current weights, learn a little (this is the "adaptation")
+
+            # --- INNER STEP: adapt the copy to this mass ---
+            # The robot practices 10 times with the original brain,
+            # then the copy takes one small learning step from that practice.
             sgd_step(fast, cheetah.collect(policy, mass, trajectories_per_step), inner_lr)
-            # outer step: practice with the ADAPTED weights and see how good they are
+
+            # --- OUTER STEP: test how good the adapted copy is ---
+            # The robot practices 10 more times, this time using the adapted copy.
             after = cheetah.collect(fast, mass, trajectories_per_step)
+
+            # Total reward of each run, averaged over the 10 runs. Saved for printing.
             scores.append(float(after["rewards"].sum(axis=1).mean()))
+
+            # Turn those runs into a loss: a number that says "how should the weights
+            # change to make the good runs more likely?"
             loss = policy_gradient_loss(fast, after)
+
+            # The gradient is the direction that would reduce the loss.
+            # We compute it for the adapted copy's weights.
             grads = torch.autograd.grad(loss, list(fast.parameters()))
-            # first-order trick: use the gradient at the adapted weights as the gradient for the start weights
+
+            # First-order trick: pretend this gradient also applies to the ORIGINAL brain.
+            # We add this task's gradient into the box, divided by 5 so the box ends up
+            # holding the AVERAGE over the 5 tasks.
             for total, g in zip(total_grads, grads):
                 total += g / tasks_per_iteration
+
+        # After all 5 tasks: hand the averaged gradient to the original brain...
         for p, g in zip(policy.parameters(), total_grads):
             p.grad = g
+
+        # ...and let Adam update the original weights one step using it.
         optimizer.step()
+
+        # "yield" is like "return", but the function keeps going afterwards.
+        # It hands back the iteration number and the average score so the main
+        # program can print progress and record it, then it continues to the next iteration.
         yield it, float(np.mean(scores))
 
 
