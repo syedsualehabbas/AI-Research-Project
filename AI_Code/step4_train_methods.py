@@ -101,21 +101,54 @@ def train_fomaml(cheetah, policy, iterations):
 
 
 def train_reptile(cheetah, policy, iterations):
+
+    # one pass = one training iteration. Repeat "iterations" times.
     for it in range(1, iterations + 1):
+
+        # A box of zeros to collect how far the copies move from the original brain.
+        # One zero-filled slot for every weight in the policy.
         total_move = [torch.zeros_like(p) for p in policy.parameters()]
+
+        # A list to remember how well the robot did on each task (for printing progress).
         scores = []
+
+        # TASK LOOP: repeat for 5 different masses (tasks_per_iteration = 5).
         for _ in range(tasks_per_iteration):
+
+            # Pick a random mass for this task.
             mass = sample_mass()
+
+            # Make a copy of the brain. The COPY will train on this mass,
+            # and the original stays untouched for now.
             fast = copy.deepcopy(policy)
-            for _ in range(reptile_inner_steps):             # train a copy on this one mass
+
+            # PRACTICE LOOP: train the copy for 3 rounds (reptile_inner_steps = 3).
+            for _ in range(reptile_inner_steps):
+                # The robot practices 10 times using the copy...
                 batch = cheetah.collect(fast, mass, trajectories_per_step)
+                # ...and the copy learns a little from that practice.
                 sgd_step(fast, batch, inner_lr)
+
+            # Save the average score of the LAST practice round, for progress printing.
             scores.append(float(batch["rewards"].sum(axis=1).mean()))
+
+            # Measure how far the trained copy moved away from the original brain.
+            # (copy's weights - original weights), divided by 5 so the box ends up
+            # holding the AVERAGE move over the 5 tasks.
+            # .detach() just means "use the plain numbers, don't track gradients".
             for move, f, p in zip(total_move, fast.parameters(), policy.parameters()):
                 move += (f.detach() - p.detach()) / tasks_per_iteration
-        with torch.no_grad():                                # move the start weights toward the copies
+
+        # After all 5 tasks: move the ORIGINAL brain toward where the copies ended up.
+        # torch.no_grad() means "we are editing weights directly, not learning by gradient".
+        with torch.no_grad():
             for p, move in zip(policy.parameters(), total_move):
+                # Take 50% (reptile_lr = 0.5) of the average move.
                 p += reptile_lr * move
+
+        # "yield" hands back the iteration number and the average score so the
+        # main program can print progress, and then the function carries on
+        # with the next iteration.
         yield it, float(np.mean(scores))
 
 
